@@ -1,32 +1,23 @@
 {
-    "arch": "x86_64",
-    "code-model": "kernel",
-    "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
-    "disable-redzone": true,
-    "dynamic-linking": false,
-    "env": "",
-    "executables": true,
-    "exe-suffix": "",
-    "features": "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-3dnow,-3dnowa,-avx,-avx2,+soft-float",
-    "frame-pointer": "always",
-    "has-rpath": false,
-    "linker": "rust-lld",
-    "linker-flavor": "gnu-lld",
-    "llvm-target": "x86_64-unknown-none",
-    "no-default-libraries": true,
-    "os": "none",
-    "post-link-args": {
-      "gnu-lld": [
-        "-T",
-        "kernel.ld",
-        "--oformat",
-        "binary"
-      ]  
-    },
-    "relocation-model": "static",
-    "static-position-independent-executables": "false",
-    "target-c-int-width": "32",
-    "target-endian": "little",
-    "target-pointer-width": "64",
-    "vendor": "unknown"
+  "arch": "x86_64",
+  "code-model": "kernel",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "disable-redzone": true,
+  "env": "",
+  "executables": true,
+  "exe-suffix": "",
+  "features": "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-3dnow,-3dnowa,-avx,-avx2,+soft-float",
+  "frame-pointer": "always",
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "llvm-target": "x86_64-unknown-none",
+  "os": "none",
+  "panic-strategy": "abort",
+  "post-link-args": {
+    "gnu-lld": ["-T", "kernel.ld", "--oformat", "binary"]
+  },
+  "target-c-int-width": "32",
+  "target-endian": "little",
+  "target-pointer-width": "64",
+  "vendor": "unknown"
 }
