@@ -63,7 +63,7 @@ clean :
 
 bootloader_build_flags := --target x86_64-unknown-uefi
 ifeq ($(OPT),release)
-	bootload_build_flags += --release
+	bootloader_build_flags += --release
 endif
 
 bootloader_build_deps := bootloader/Cargo.toml
