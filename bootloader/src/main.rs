@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+pub mod debug;
+
 extern crate alloc;
 
 use core::{
@@ -21,28 +23,13 @@ use uefi::{
         boot::{AllocateType, EventType, MemoryMap, MemoryType, TimerTrigger, Tpl, PAGE_SIZE},
         runtime::Time,
     },
+    CStr16,
 };
 
 use common::{
     paging::PageMap,
     registers::{CR0, CR3, CR4, IA32_EFER},
 };
-
-macro_rules! wait_for_debugger {
-    ($image_handle:expr, $system_table:expr) => {
-        let image_base: u64 = {
-            let loaded_image = $system_table
-                .boot_services()
-                .open_protocol_exclusive::<LoadedImage>($image_handle)
-                .unwrap();
-            let (image_base, _) = loaded_image.info();
-            image_base as u64
-        };
-
-        info!("waiting for debugger... (image base = {:#x})", image_base);
-        unsafe { asm!("2: jmp 2b") };
-    };
-}
 
 /* Note [The kernel's entrypoint]
 
@@ -69,93 +56,19 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         info!("image base: {:#x})", image_base);
     }
 
-    let interrupted = check_boot_interruption(&mut system_table);
-
-    if interrupted {
+    if check_boot_interruption(&mut system_table) {
         browse_memory_map(&mut system_table);
     }
 
-    let mut kernel_file = {
-        let mut fs = system_table
-            .boot_services()
-            .get_image_file_system(image_handle)
-            .unwrap();
+    let (kernel_addr, kernel_num_pages) =
+        match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin")) {
+            Err(err) => {
+                return err;
+            }
+            Ok(value) => value,
+        };
 
-        let mut root = fs.open_volume().unwrap();
-
-        let kernel_filename = cstr16!("kernel.bin");
-        match root.open(kernel_filename, FileMode::Read, FileAttribute::empty()) {
-            Ok(file) => file.into_regular_file().unwrap(),
-            Err(err) => match err.status() {
-                Status::NOT_FOUND => {
-                    uefi::println!("error: {} not found", kernel_filename);
-                    return Status::ABORTED;
-                }
-                _ => {
-                    uefi::println!("error: failed to open {}: {}", kernel_filename, err);
-                    return Status::ABORTED;
-                }
-            },
-        }
-    };
-
-    let kernel_size = {
-        /*
-        The definition of [FileInfo](https://docs.rs/uefi/latest/uefi/proto/media/file/struct.FileInfo.html) is:
-
-        ```rust
-        #[repr(C)]
-        pub struct FileInfo {
-            size: u64,
-            file_size: u64,
-            physical_size: u64,
-            create_time: Time,
-            last_access_time: Time,
-            modification_time: Time,
-            attribute: FileAttribute,
-            file_name: [Char16],
-        }
-        ```
-
-        It doesn't have `Sized` because of the `[Char16]` at the end.
-        Its minimum size (if the file name was 0 characters, and ignoring alignment padding) would be the sum of the
-        sizes of all other fields.
-        */
-        let min_fileinfo_size = core::mem::size_of::<u64>() * 3
-            + core::mem::size_of::<Time>() * 3
-            + core::mem::size_of::<FileAttribute>();
-
-        // Since the file name will be more than zero characters, the grow loop will be triggered at least once.
-        // It's less efficient, but I'm okay paying that cost to test the grow loop.
-        let kernel_file_info = alloc_growing_ref(&mut system_table, min_fileinfo_size, |storage| {
-            kernel_file.get_info::<FileInfo>(storage)
-        })
-        .unwrap();
-
-        kernel_file_info.as_ref().file_size() as usize
-    };
-
-    let kernel_pages = (kernel_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let kernel_addr: u64 = system_table
-        .boot_services()
-        .allocate_pages(
-            AllocateType::AnyPages,
-            MemoryType::LOADER_DATA,
-            kernel_pages,
-        )
-        .unwrap();
-
-    info!("kernel address: {:#x}", kernel_addr);
-    info!(
-        "allocated {} pages for {}B kernel",
-        kernel_pages, kernel_size
-    );
-
-    let kernel_buffer: &mut [u8] =
-        unsafe { core::slice::from_raw_parts_mut(kernel_addr as *mut u8, kernel_size) };
-    kernel_file.read(kernel_buffer).unwrap();
-    kernel_file.close();
-    info!("finished reading kernel into memory");
+    // TODO: exit boot services and allocate pages from UEFI's memory map.
 
     let mut allocate_pages = |n| {
         system_table
@@ -165,73 +78,19 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     };
 
     let mut page_map = PageMap::new(&mut allocate_pages, PAGE_SIZE);
-    {
-        {
-            // Assumes that the stack precedes the kernel in virtual address space.
-            let stack_physical_address = system_table
-                .boot_services()
-                .allocate_pages(
-                    AllocateType::AnyPages,
-                    MemoryType::LOADER_DATA,
-                    (KERNEL_ENTRYPOINT / 0x1000) as usize,
-                )
-                .unwrap();
-            page_map.set_writable(&mut allocate_pages, 0x0, stack_physical_address);
-        }
 
-        let mut next_virtual_page_address = KERNEL_ENTRYPOINT;
-        let mut next_physical_page_address = kernel_addr;
-        for _page in 0..kernel_pages {
-            page_map.set(
-                &mut allocate_pages,
-                next_virtual_page_address,
-                next_physical_page_address,
-            );
+    map_stack(&mut allocate_pages, &mut page_map);
 
-            next_virtual_page_address += PAGE_SIZE as u64;
-            next_physical_page_address += PAGE_SIZE as u64;
-        }
-        info!("finished setting up page map for kernel");
+    map_kernel(
+        &mut allocate_pages,
+        &mut page_map,
+        kernel_addr,
+        kernel_num_pages,
+    );
 
-        let switch_to_kernel_addr: u64 = unsafe {
-            let addr: u64;
-            asm!("2: lea {addr}, switch_to_kernel", addr = out(reg) addr);
-            addr
-        };
-        info!("switch_to_kernel address: {:#x}", switch_to_kernel_addr);
-
-        /* The address of the 4KiB aligned page in which `switch_to_kernel` resides.
-
-        If paging is enabled, then UEFI virtual memory is identity-mapped (<https://uefi.org/specs/UEFI/2.9_A/02_Overview.html?highlight=identity#ia-32-platforms>).
-        Therefore this address is also the phsical address of the page.
-
-        As long as the `switch_to_kernel` function stays under 4KiB in length, this page is
-        the only one that needs to be identity-mapped into the kernel's virtual address space.
-        Ideally, the kernel would remove the mapping after the switch.
-
-        I think the only constraint on `switch_to_kernel`'s location is that it doesn't overlap
-        with the kernel's virtual address. If we work at the granularity of a page: `switch_to_kernel`'s virtual address isn't in the first page of the kernel.
-
-        If the kernel lives at 0x0 then 0x0-0xfff would be out of bounds, while everything else
-        is in.
-        */
-        let switch_to_kernel_page_addr: u64 = switch_to_kernel_addr & !0xfff;
-
-        assert!(
-            switch_to_kernel_page_addr > KERNEL_ENTRYPOINT + 0xfff,
-            "switch_to_kernel overlaps with start of kernel"
-        );
-
-        page_map.set(
-            &mut allocate_pages,
-            switch_to_kernel_page_addr,
-            switch_to_kernel_page_addr,
-        );
-        info!("finished setting up page map for context switch");
-    }
+    map_switch_to_kernel(&mut allocate_pages, &mut page_map);
 
     // TODO: map the rest of available memory?
-
     info!("pml4 address: {:#x}", page_map.address());
     info!("total memory mapped: {}B", page_map.size());
 
@@ -275,13 +134,21 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     unsafe { switch_to_kernel(page_map) }
 }
 
-#[no_mangle]
-unsafe extern "sysv64" fn switch_to_kernel(page_map: PageMap) -> ! {
+unsafe fn switch_to_kernel(page_map: PageMap) -> ! {
     let mut cr3 = CR3::read();
 
     cr3.set_address(page_map.address());
 
+    /* Note [Disabling interrupts before writing to CR3]
+
+    When interrupts aren't disabled, I get a page fault immediately after writing to
+    CR3. The CPU tries to access the IDT that UEFI installed, but the IDT's address
+    is no longer mapped.
+
+    TODO: allocate and map my own IDT, then re-enable interrupts.
+     */
     asm!("cli");
+
     cr3.write();
 
     asm!(
@@ -295,6 +162,169 @@ unsafe extern "sysv64" fn switch_to_kernel(page_map: PageMap) -> ! {
     );
 
     unreachable_unchecked()
+}
+
+fn load_kernel(
+    image_handle: Handle,
+    system_table: &mut SystemTable<Boot>,
+    kernel_file_name: &CStr16,
+) -> Result<(u64, usize), uefi::Status> {
+    let mut kernel_file = {
+        let mut fs = system_table
+            .boot_services()
+            .get_image_file_system(image_handle)
+            .unwrap();
+
+        let mut root = fs.open_volume().unwrap();
+
+        match root.open(kernel_file_name, FileMode::Read, FileAttribute::empty()) {
+            Ok(file) => file.into_regular_file().unwrap(),
+            Err(err) => match err.status() {
+                Status::NOT_FOUND => {
+                    uefi::println!("error: {} not found", kernel_file_name);
+                    return Err(Status::ABORTED);
+                }
+                _ => {
+                    uefi::println!("error: failed to open {}: {}", kernel_file_name, err);
+                    return Err(Status::ABORTED);
+                }
+            },
+        }
+    };
+
+    let kernel_size = {
+        /*
+        The definition of [FileInfo](https://docs.rs/uefi/latest/uefi/proto/media/file/struct.FileInfo.html) is:
+
+        ```rust
+        #[repr(C)]
+        pub struct FileInfo {
+            size: u64,
+            file_size: u64,
+            physical_size: u64,
+            create_time: Time,
+            last_access_time: Time,
+            modification_time: Time,
+            attribute: FileAttribute,
+            file_name: [Char16],
+        }
+        ```
+
+        It doesn't have `Sized` because of the `[Char16]` at the end.
+        Its minimum size (if the file name was 0 characters, and ignoring alignment padding) would be the sum of the
+        sizes of all other fields.
+        */
+        let min_fileinfo_size = core::mem::size_of::<u64>() * 3
+            + core::mem::size_of::<Time>() * 3
+            + core::mem::size_of::<FileAttribute>();
+
+        // Since the file name will be more than zero characters, the grow loop will be triggered at least once.
+        // It's less efficient, but I'm okay paying that cost to test the grow loop.
+        let kernel_file_info = alloc_growing_ref(system_table, min_fileinfo_size, |storage| {
+            kernel_file.get_info::<FileInfo>(storage)
+        })
+        .unwrap();
+
+        kernel_file_info.as_ref().file_size() as usize
+    };
+
+    let kernel_pages = (kernel_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let kernel_addr: u64 = system_table
+        .boot_services()
+        .allocate_pages(
+            AllocateType::AnyPages,
+            MemoryType::LOADER_DATA,
+            kernel_pages,
+        )
+        .unwrap();
+
+    info!("kernel address: {:#x}", kernel_addr);
+    info!(
+        "allocated {} pages for {}B kernel",
+        kernel_pages, kernel_size
+    );
+
+    let kernel_buffer: &mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(kernel_addr as *mut u8, kernel_size) };
+    kernel_file.read(kernel_buffer).unwrap();
+    kernel_file.close();
+    info!("finished reading kernel into memory");
+
+    Ok((kernel_addr, kernel_pages))
+}
+
+fn map_stack(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
+    // Assumes that the stack precedes the kernel in virtual address space.
+    let stack_physical_address = allocate_pages((KERNEL_ENTRYPOINT / (PAGE_SIZE as u64)) as usize);
+    page_map.set_writable(allocate_pages, 0x0, stack_physical_address);
+}
+
+fn map_kernel(
+    allocate_pages: &mut dyn FnMut(usize) -> u64,
+    page_map: &mut PageMap,
+    kernel_physical_addr: u64,
+    kernel_num_pages: usize,
+) {
+    let mut next_virtual_page_address = KERNEL_ENTRYPOINT;
+    let mut next_physical_page_address = kernel_physical_addr;
+    for _page in 0..kernel_num_pages {
+        page_map.set(
+            allocate_pages,
+            next_virtual_page_address,
+            next_physical_page_address,
+        );
+
+        next_virtual_page_address += PAGE_SIZE as u64;
+        next_physical_page_address += PAGE_SIZE as u64;
+    }
+    info!("finished setting up page map for kernel");
+}
+
+fn map_switch_to_kernel(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
+    let switch_to_kernel_addr: u64 = unsafe {
+        let addr: u64;
+        asm!("2: lea {0}, {1}", out(reg) addr, sym switch_to_kernel);
+        addr
+    };
+
+    /* The address of the 4KiB aligned page in which the `switch_to_kernel` function resides.
+
+    If paging is enabled, then UEFI virtual memory is identity-mapped (<https://uefi.org/specs/UEFI/2.9_A/02_Overview.html?highlight=identity#ia-32-platforms>).
+    Therefore this address is also the phsical address of the page.
+
+    As long as the `switch_to_kernel` function stays under 4KiB in length, this page is
+    the only one that needs to be identity-mapped into the kernel's virtual address space.
+    Ideally, the kernel would remove the mapping after the switch.
+
+    I think the only constraint on `switch_to_kernel`'s location is that it doesn't overlap
+    with the kernel's virtual address. If we work at the granularity of a page: `switch_to_kernel`'s virtual address isn't in the first page of the kernel.
+
+    If the kernel lives at 0x0 then 0x0-0xfff would be out of bounds, while everything else
+    is in.
+    */
+    let switch_to_kernel_page_addr: u64 = switch_to_kernel_addr & !0xfff;
+    assert!(
+        switch_to_kernel_page_addr > KERNEL_ENTRYPOINT + 0xfff,
+        "switch_to_kernel overlaps with start of kernel"
+    );
+
+    info!(
+        "switch_to_kernel page address: {:#x}",
+        switch_to_kernel_page_addr
+    );
+
+    /* The page in which `switch_to_kernel` needs to be identity-mapped because that
+    function is going to set `page_map` as the active virtual memory map. After this
+    happens, instruction fetches need to return the remaining instructions of
+    `switch_to_kernel`. When this region of code isn't mapped, the instruction fetches
+    will cause page faults.
+    */
+    page_map.set(
+        allocate_pages,
+        switch_to_kernel_page_addr,
+        switch_to_kernel_page_addr,
+    );
+    info!("finished setting up page map for context switch");
 }
 
 struct PooledRef<'a, T: ?Sized> {
