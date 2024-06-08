@@ -1,0 +1,13 @@
+[package]
+name = "uefi-pci"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+uefi = "0.29"
+uefi-raw = "0.6"
+
+[patch.crates-io]
+uefi = { git = "https://github.com/LightAndLight/uefi-rs.git", branch = "fix-versions" }
+uefi-macros = { git = "https://github.com/LightAndLight/uefi-rs.git", branch = "fix-versions" }
+uefi-raw = { git = "https://github.com/LightAndLight/uefi-rs.git", branch = "fix-versions" }
