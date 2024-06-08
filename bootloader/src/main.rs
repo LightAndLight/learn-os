@@ -9,6 +9,7 @@ use core::{
     arch::asm,
     borrow::{Borrow, BorrowMut},
     hint::unreachable_unchecked,
+    ptr::NonNull,
 };
 
 use alloc::vec::Vec;
@@ -365,7 +366,7 @@ fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
     mut f: impl FnMut(&mut [u8]) -> uefi::Result<&mut T, E>,
 ) -> uefi::Result<PooledRef<'a, T>, E> {
     let mut storage_size = initial_size;
-    let mut storage_addr: *mut u8;
+    let mut storage_addr: NonNull<u8>;
 
     let mut buffer: &mut [u8];
     let buffer_typed: &mut T;
@@ -375,7 +376,7 @@ fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
         storage_addr = boot_services
             .allocate_pool(MemoryType::BOOT_SERVICES_DATA, storage_size)
             .unwrap();
-        buffer = unsafe { core::slice::from_raw_parts_mut(storage_addr, storage_size) };
+        buffer = unsafe { core::slice::from_raw_parts_mut(storage_addr.as_ptr(), storage_size) };
 
         info!("trying get_info with buffer size {}", storage_size);
         match f(buffer) {
@@ -386,7 +387,7 @@ fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
             }
             Err(err) => {
                 info!("alloc_growing_ref failed (buffer too small)");
-                unsafe { boot_services.free_pool(storage_addr).unwrap() };
+                unsafe { boot_services.free_pool(storage_addr.as_ptr()).unwrap() };
 
                 match err.status() {
                     Status::BUFFER_TOO_SMALL => {
@@ -403,7 +404,7 @@ fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
 
     Ok(PooledRef {
         system_table,
-        address: storage_addr,
+        address: storage_addr.as_ptr(),
         typed_reference: buffer_typed,
     })
 }
@@ -445,7 +446,7 @@ fn alloc_growing<'a, T, E: core::fmt::Debug>(
     mut f: impl FnMut(&mut [u8]) -> uefi::Result<T, E>,
 ) -> uefi::Result<Pooled<'a, T>, E> {
     let mut storage_size = initial_size;
-    let mut storage_addr: *mut u8;
+    let mut storage_addr: NonNull<u8>;
 
     let mut buffer: &mut [u8];
     let value: T;
@@ -455,7 +456,7 @@ fn alloc_growing<'a, T, E: core::fmt::Debug>(
         storage_addr = boot_services
             .allocate_pool(MemoryType::BOOT_SERVICES_DATA, storage_size)
             .unwrap();
-        buffer = unsafe { core::slice::from_raw_parts_mut(storage_addr, storage_size) };
+        buffer = unsafe { core::slice::from_raw_parts_mut(storage_addr.as_ptr(), storage_size) };
 
         info!("trying get_info with buffer size {}", storage_size);
         match f(buffer) {
@@ -466,7 +467,7 @@ fn alloc_growing<'a, T, E: core::fmt::Debug>(
             }
             Err(err) => {
                 info!("alloc_growing failed (buffer too small)");
-                unsafe { boot_services.free_pool(storage_addr).unwrap() };
+                unsafe { boot_services.free_pool(storage_addr.as_ptr()).unwrap() };
 
                 match err.status() {
                     Status::BUFFER_TOO_SMALL => {
@@ -483,7 +484,7 @@ fn alloc_growing<'a, T, E: core::fmt::Debug>(
 
     Ok(Pooled {
         system_table,
-        buffer: storage_addr,
+        buffer: storage_addr.as_ptr(),
         value,
     })
 }
