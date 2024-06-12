@@ -21,6 +21,7 @@ dependencies = [
  "common",
  "log",
  "uefi",
+ "uefi-pci",
 ]
 
 [[package]]

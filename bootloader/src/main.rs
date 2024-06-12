@@ -21,7 +21,10 @@ use uefi::{
         media::file::{File, FileAttribute, FileInfo, FileMode},
     },
     table::{
-        boot::{AllocateType, EventType, MemoryMap, MemoryType, TimerTrigger, Tpl, PAGE_SIZE},
+        boot::{
+            AllocateType, EventType, MemoryMap, MemoryType, OpenProtocolAttributes,
+            OpenProtocolParams, TimerTrigger, Tpl, PAGE_SIZE,
+        },
         runtime::Time,
     },
     CStr16,
@@ -31,6 +34,7 @@ use common::{
     paging::PageMap,
     registers::{CR0, CR3, CR4, IA32_EFER},
 };
+use uefi_pci::{PciConfigurationAddress, PciRootBridgeIo};
 
 /* Note [The kernel's entrypoint]
 
@@ -54,7 +58,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             image_base as u64
         };
 
-        info!("image base: {:#x})", image_base);
+        info!("image base: {:#x}", image_base);
     }
 
     if check_boot_interruption(&mut system_table) {
@@ -68,8 +72,6 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             }
             Ok(value) => value,
         };
-
-    // TODO: exit boot services and allocate pages from UEFI's memory map.
 
     let mut allocate_pages = |n| {
         system_table
@@ -92,28 +94,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     map_switch_to_kernel(&mut allocate_pages, &mut page_map);
 
     // TODO: map the rest of available memory?
-    info!("pml4 address: {:#x}", page_map.address());
     info!("total memory mapped: {}B", page_map.size());
-
-    page_map.debug(
-        &mut |index, pml4e| {
-            info!("pml4e {}: {:#x}", index, pml4e.value());
-        },
-        &mut |index, pdpte| {
-            info!("  pdpte {}: {:#x}", index, pdpte.value());
-        },
-        &mut |index, pde| {
-            info!("    pde {}: {:#x}", index, pde.value());
-        },
-        &mut |index, virtual_address, pte| {
-            info!(
-                "      pte {} ({:#x}): {:#x}",
-                index,
-                virtual_address,
-                pte.value()
-            );
-        },
-    );
 
     /* 4-level paging requires:
 
@@ -132,10 +113,15 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         "4-level paging isn't enabled"
     );
 
-    unsafe { switch_to_kernel(page_map) }
+    let serial_controller_port = get_serial_controller(image_handle, system_table.boot_services());
+
+    let (_system_table, _memory_map) =
+        unsafe { system_table.exit_boot_services(MemoryType::LOADER_DATA) };
+
+    unsafe { switch_to_kernel(page_map, serial_controller_port) }
 }
 
-unsafe fn switch_to_kernel(page_map: PageMap) -> ! {
+unsafe fn switch_to_kernel(page_map: PageMap, serial_controller_port: u16) -> ! {
     let mut cr3 = CR3::read();
 
     cr3.set_address(page_map.address());
@@ -156,10 +142,12 @@ unsafe fn switch_to_kernel(page_map: PageMap) -> ! {
         "mov rbp, {0}",
         "mov rsp, {0}",
         "mov rdi, {1}",
+        "mov si, {2:x}",
         "jmp {0}",
         // See Note [The kernel's virtual address]
         in(reg) KERNEL_ENTRYPOINT,
-        in(reg) PAGE_SIZE
+        in(reg) PAGE_SIZE,
+        in(reg) serial_controller_port
     );
 
     unreachable_unchecked()
@@ -328,6 +316,212 @@ fn map_switch_to_kernel(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: 
     info!("finished setting up page map for context switch");
 }
 
+pub struct PciHeader {
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub command: u32,
+    pub header_type: u8,
+}
+
+fn pci_header_read(
+    pci_root_bridge: &PciRootBridgeIo,
+    bus: u8,
+    device: u8,
+    function: u8,
+) -> PciHeader {
+    let vendor_and_device_ids = pci_root_bridge
+        .pci_read_u32(PciConfigurationAddress {
+            bus,
+            device,
+            function,
+            register: 0x0,
+        })
+        .unwrap();
+
+    let command = pci_root_bridge
+        .pci_read_u32(PciConfigurationAddress {
+            bus,
+            device,
+            function,
+            register: 0x4,
+        })
+        .unwrap();
+
+    let header_type = pci_root_bridge
+        .pci_read_u8(PciConfigurationAddress {
+            bus,
+            device,
+            function,
+            register: 0xe,
+        })
+        .unwrap();
+
+    PciHeader {
+        vendor_id: (vendor_and_device_ids & 0xffff) as u16,
+        device_id: (vendor_and_device_ids >> 16) as u16,
+        command,
+        header_type,
+    }
+}
+
+/// Find the serial controller's I/O port via PCI.
+fn get_serial_controller(image_handle: Handle, boot_services: &BootServices) -> u16 {
+    let handle = boot_services
+        .get_handle_for_protocol::<PciRootBridgeIo>()
+        .unwrap();
+
+    /* `open_protocol` is unsafe because it gives back a protocol interface that could be
+    uninstalled by other code, invalidating the Rust reference. To reflect this, I'm using
+    an `unsafe` block for the lifetime of `pci_root_bridge`.
+    */
+    unsafe {
+        /* I originally tried to do this with `open_protocol_exclusive`, and the program hanged.
+
+        Looking through the debugger I found that the call was returning `Err`, but the panic
+        handler in the `unwrap` was looping instead of printing then crashing. I found that even
+        `info!` logging broke after `open_protocol_exclusive` failed, even if I didn't `unwrap`.
+
+        I had to go into the debugger to find the EFI status code. It was obscene decimal value
+        but had a simple hex representation: `0x8000...000F`.
+        The [EFI status codes reference](https://uefi.org/specs/UEFI/2.10/Apx_D_Status_Codes.html#status-codes)
+        shows this is `EFI_ACCESS_DENIED`.
+
+        [`OpenProtocol`](https://uefi.org/specs/UEFI/2.10/07_Services_Boot_Services.html?highlight=openprotocol#efi-boot-services-openprotocol)
+        lists the status codes it returns and why. I realised that opening this protocol exclusively
+        was the issue. There is probably a PCI Bus Driver running with driver-exclusive access to
+        the protocol.
+        */
+        let pci_root_bridge = boot_services
+            .open_protocol::<PciRootBridgeIo>(
+                OpenProtocolParams {
+                    handle,
+                    agent: image_handle,
+                    controller: None,
+                },
+                OpenProtocolAttributes::GetProtocol,
+            )
+            .unwrap();
+
+        {
+            let pci_header = pci_header_read(&pci_root_bridge, 0, 0, 0);
+
+            // 0x8086 for Intel, woohoo!
+            assert_eq!(pci_header.vendor_id, 0x8086);
+
+            /* I was reading the 82371FB (PIIX) and 82371SB (PIIX3) datasheet because it
+            was the first thing I saw on in the [440FX resources](https://web.archive.org/web/20041127232037/https://www.intel.com/design/archives/chipsets/440/index.htm),
+            (QEMU's default chipset) with PCI in its name. So I was expecting to see 0x7000 because I
+            thought I was on the PIIX3. I found 0x1237 instead.
+
+            In the QEMU codebase, 0x1237 lead me to a constant named
+            [`PCI_DEVICE_ID_INTEL_82441`](https://github.com/qemu/qemu/blob/dec9742cbc59415a8b83e382e7ae36395394e4bd/include/hw/pci/pci_ids.h#L241).
+            I was looking at the wrong datasheet; the first listing in the 440FX resources
+            is for the [82441FX PCI and Memory Controller](https://web.archive.org/web/20030706082243/http://intel.com/design/chipsets/datashts/29054901.pdf).
+            Section 3.2.3 lists the device identification register (DID) with a default value of 0x1237.
+            */
+            assert_eq!(pci_header.device_id, 0x1237);
+        }
+
+        let serial_controller_pci_header = pci_header_read(&pci_root_bridge, 0, 3, 0);
+        assert_eq!(serial_controller_pci_header.vendor_id, 0x1b36);
+        assert_eq!(serial_controller_pci_header.device_id, 0x0002);
+
+        let serial_controller_bar0_value = pci_root_bridge
+            .pci_read_u32(PciConfigurationAddress {
+                bus: 0,
+                device: 3,
+                function: 0,
+                register: 0x10,
+            })
+            .unwrap();
+        assert!(
+            serial_controller_bar0_value <= u16::MAX as u32,
+            "serial controller BAR0 is not a 16-bit value"
+        );
+        assert_eq!(
+            serial_controller_bar0_value & 0x1,
+            0x1,
+            "serial controller BAR0 is not in I/O space"
+        );
+
+        let serial_controller_io_address: u16 = (serial_controller_bar0_value & 0xfffffff0) as u16;
+
+        serial_controller_io_address
+    }
+}
+
+fn pci_device_enumerate(pci_root_bridge: &PciRootBridgeIo) {
+    /* I listed the available devices for QEMU's default machine, and got:
+
+    * B0 D0 F0 - 8086:1237 (the 82441FX PMC)
+    * B0 D1 F0 - 8086:7000 (the PIIX3)
+    * B0 D2 F0 - 1234:1111 (QEMU standard VGA)
+    * B0 D3 F0 - 8086:100e (82540EM ethernet controller - QEMU source code helps again)
+    * B0 D4 F0 - 8086:24cd (82801DB ICH4)
+
+    After twiddling the QEMU flags so that the network card is disabled and
+    the USB keyboard is attached to the PIIX3, I just have the first 3.
+
+    The PIIX3 is a multi-function device. The USB host controller is on
+    bus 0, device 1, function 2, with `VID:DID = 8086:7020`.
+
+    Weirdly, I also get a device with ID 7113. This is a power management
+    controller from the PIIX4.
+    */
+    let print_pci_header = |bus, device, function, pci_header: &PciHeader| {
+        info!("bus: {bus}, device: {device}, function: {function}");
+        info!(
+            "VID:DID {:x}:{:x}",
+            pci_header.vendor_id, pci_header.device_id
+        );
+        info!("header type: {:#x}", pci_header.header_type);
+    };
+
+    for bus in 0..=255 {
+        for device in 0..=31 {
+            let function = 0;
+
+            let pci_header = pci_header_read(pci_root_bridge, bus, device, function);
+            if pci_header.vendor_id != 0xffff {
+                print_pci_header(bus, device, function, &pci_header);
+
+                if pci_header.header_type & 0x80 == 0x80 {
+                    // multi-function device
+
+                    for function in 1..=7 {
+                        let pci_header = pci_header_read(pci_root_bridge, bus, device, function);
+                        if pci_header.vendor_id != 0xffff {
+                            print_pci_header(bus, device, function, &pci_header);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn page_map_debug(page_map: &PageMap) {
+    page_map.debug(
+        &mut |index, pml4e| {
+            info!("pml4e {}: {:#x}", index, pml4e.value());
+        },
+        &mut |index, pdpte| {
+            info!("  pdpte {}: {:#x}", index, pdpte.value());
+        },
+        &mut |index, pde| {
+            info!("    pde {}: {:#x}", index, pde.value());
+        },
+        &mut |index, virtual_address, pte| {
+            info!(
+                "      pte {} ({:#x}): {:#x}",
+                index,
+                virtual_address,
+                pte.value()
+            );
+        },
+    );
+}
+
 struct PooledRef<'a, T: ?Sized> {
     system_table: &'a mut SystemTable<Boot>,
     address: *mut u8,
@@ -360,11 +554,11 @@ impl<'a, T: ?Sized> BorrowMut<T> for PooledRef<'a, T> {
     }
 }
 
-fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
-    system_table: &'a mut SystemTable<Boot>,
+fn alloc_growing_ref<T: ?Sized, E: core::fmt::Debug>(
+    system_table: &mut SystemTable<Boot>,
     initial_size: usize,
     mut f: impl FnMut(&mut [u8]) -> uefi::Result<&mut T, E>,
-) -> uefi::Result<PooledRef<'a, T>, E> {
+) -> uefi::Result<PooledRef<T>, E> {
     let mut storage_size = initial_size;
     let mut storage_addr: NonNull<u8>;
 
@@ -406,86 +600,6 @@ fn alloc_growing_ref<'a, T: ?Sized, E: core::fmt::Debug>(
         system_table,
         address: storage_addr.as_ptr(),
         typed_reference: buffer_typed,
-    })
-}
-struct Pooled<'a, T> {
-    system_table: &'a mut SystemTable<Boot>,
-    buffer: *mut u8,
-    value: T,
-}
-
-impl<'a, T> Drop for Pooled<'a, T> {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.system_table.boot_services().free_pool(self.buffer);
-        };
-    }
-}
-
-impl<'a, T> AsRef<T> for Pooled<'a, T> {
-    fn as_ref(&self) -> &T {
-        &self.value
-    }
-}
-
-impl<'a, T> Borrow<T> for Pooled<'a, T> {
-    fn borrow(&self) -> &T {
-        &self.value
-    }
-}
-
-impl<'a, T> BorrowMut<T> for Pooled<'a, T> {
-    fn borrow_mut(&mut self) -> &mut T {
-        &mut self.value
-    }
-}
-
-fn alloc_growing<'a, T, E: core::fmt::Debug>(
-    system_table: &'a mut SystemTable<Boot>,
-    initial_size: usize,
-    mut f: impl FnMut(&mut [u8]) -> uefi::Result<T, E>,
-) -> uefi::Result<Pooled<'a, T>, E> {
-    let mut storage_size = initial_size;
-    let mut storage_addr: NonNull<u8>;
-
-    let mut buffer: &mut [u8];
-    let value: T;
-
-    let boot_services = system_table.boot_services();
-    loop {
-        storage_addr = boot_services
-            .allocate_pool(MemoryType::BOOT_SERVICES_DATA, storage_size)
-            .unwrap();
-        buffer = unsafe { core::slice::from_raw_parts_mut(storage_addr.as_ptr(), storage_size) };
-
-        info!("trying get_info with buffer size {}", storage_size);
-        match f(buffer) {
-            Ok(new_value) => {
-                info!("alloc_growing succeeded");
-                value = new_value;
-                break;
-            }
-            Err(err) => {
-                info!("alloc_growing failed (buffer too small)");
-                unsafe { boot_services.free_pool(storage_addr.as_ptr()).unwrap() };
-
-                match err.status() {
-                    Status::BUFFER_TOO_SMALL => {
-                        storage_size += 100;
-                        continue;
-                    }
-                    _ => {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(Pooled {
-        system_table,
-        buffer: storage_addr.as_ptr(),
-        value,
     })
 }
 
@@ -593,8 +707,8 @@ fn browse_memory_map(system_table: &mut SystemTable<Boot>) {
 
             uefi::println!("memory map entry {}", index);
             uefi::println!("  memory type: {:?}", memory_map_entry.ty);
-            uefi::println!("  physical start: {:?}", memory_map_entry.phys_start);
-            uefi::println!("  virtual start: {:?}", memory_map_entry.virt_start);
+            uefi::println!("  physical start: {:#x}", memory_map_entry.phys_start);
+            uefi::println!("  virtual start: {:#x}", memory_map_entry.virt_start);
             uefi::println!("  page count: {:?}", memory_map_entry.page_count);
             uefi::println!("  attribute: {:?}", memory_map_entry.att);
         }

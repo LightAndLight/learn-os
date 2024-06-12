@@ -19,12 +19,35 @@ run : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
 	chmod 0666 $(BUILD)/OVMF_CODE.fd $(BUILD)/OVMF_VARS.fd
 
-	# -enable-kvm is not compatible with -d int
+	# Debugging:
+	# * `-no-reboot`: don't reboot on error (I find it easier to debug things this way)
+	# * `-d int`: print interrupts to stdout
+	# * `-D qemu.log`: write debug into to `qemu.log` instead of stderr (need to keep the terminal clean for serial communication over stdio)
+	#
+	# Machine:
+	# * `-M pc-i440fx-8.2`: 440FX northbridge + PIIX3 southbridge (see also [QEMU i440FX PC](https://www.qemu.org/docs/master/system/i386/pc.html))
+	#
+	# Output:
+	# * `-chardev stdio,id=chr0`: make stdin and stdout available to the VM
+	# * `-nographic`: run QEMU without GUI
+	#
+	# Devices:
+	# * `-nic none`: disable network card
+	# * `-usb`: enable the USB host controller in the PIIX3 (see also: [QEMU USB Emulation](https://www.qemu.org/docs/master/system/devices/usb.html))
+	# * `-device usb-kbd`: receive keyboard input via USB
+	# * `-device pci-serial,chardev=chr0`: [add a PCI serial device](https://www.qemu.org/docs/master/specs/pci-serial.html)
+	#   and connect it to stdin / stdout via the previously-defined character device.
+	#
+	# Note: `-enable-kvm`, which is a commonly suggested QEMU flag, is not compatible with with `-d int`.
 	qemu-system-x86_64 \
 		-no-reboot \
 		-d int \
-		-boot menu=on,splash-time=0 \
-		-vga std \
+		-D qemu.log \
+		-M pc-i440fx-8.2 \
+		-chardev stdio,id=chr0 \
+		-display none \
+		-nic none \
+		-device pci-serial,chardev=chr0 \
 		-drive if=pflash,format=raw,readonly=on,file=$(BUILD)/OVMF_CODE.fd \
 		-drive if=pflash,format=raw,readonly=off,file=$(BUILD)/OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:$(BUILD)/esp
@@ -38,15 +61,21 @@ debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/ker
 	cp $$OVMF_PATH/OVMF_CODE.fd $(BUILD)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
 	chmod 0666 $(BUILD)/OVMF_CODE.fd $(BUILD)/OVMF_VARS.fd
-	
-	qemu-system-x86_64 \
-		-no-reboot \
-		-s \
-		-boot menu=on,splash-time=0 \
-		-vga std \
-		-drive if=pflash,format=raw,readonly=on,file=$(BUILD)/OVMF_CODE.fd \
-		-drive if=pflash,format=raw,readonly=off,file=$(BUILD)/OVMF_VARS.fd \
-		-drive format=raw,file=fat:rw:$(BUILD)/esp & \
+
+	$(TERM) -e \
+		qemu-system-x86_64 \
+			-s \
+			-no-reboot \
+			-d int \
+			-D qemu.log \
+			-M pc-i440fx-8.2 \
+			-chardev stdio,id=chr0 \
+			-display none \
+			-nic none \
+			-device pci-serial,chardev=chr0 \
+			-drive if=pflash,format=raw,readonly=on,file=$(BUILD)/OVMF_CODE.fd \
+			-drive if=pflash,format=raw,readonly=off,file=$(BUILD)/OVMF_VARS.fd \
+			-drive format=raw,file=fat:rw:$(BUILD)/esp &
 	lldb \
 		-O "target create --no-dependents --arch x86_64 bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi --symfile bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.pdb" \
 		-O "gdb-remote localhost:1234"
@@ -69,6 +98,7 @@ endif
 bootloader_build_deps := bootloader/Cargo.toml
 bootloader_build_deps += $(shell fd -e rs --full-path bootloader/src)
 bootloader_build_deps += $(shell fd -e rs --full-path common/src)
+bootloader_build_deps += $(shell fd -e rs --full-path uefi-pci/src)
 bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi : $(bootloader_build_deps)
 	cd bootloader && cargo build $(bootloader_build_flags)
 

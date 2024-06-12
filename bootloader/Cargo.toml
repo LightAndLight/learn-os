@@ -10,6 +10,7 @@ log = "0.4.21"
 uefi = { version = "0.29.0", features = ["logger", "alloc", "global_allocator", "panic_handler"] }
 
 common = { path = "../common" }
+uefi-pci = { path = "../uefi-pci" }
 
 [patch.crates-io]
 uefi = { git = "https://github.com/LightAndLight/uefi-rs.git", branch = "fix-versions" }
