@@ -218,13 +218,10 @@ impl IA32_EFER {
 
         unsafe {
             asm!(
-                "mov ecx, {index:e}",
                 "rdmsr",
-                "mov {value_high:e}, edx",
-                "mov {value_low:e}, eax",
-                index = in(reg) Self::REGISTER_ADDRESS,
-                value_high = out(reg) value_high,
-                value_low = out(reg) value_low,
+                in("ecx") Self::REGISTER_ADDRESS,
+                out("edx") value_high,
+                out("eax") value_low,
             );
         }
 
