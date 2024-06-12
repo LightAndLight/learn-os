@@ -10,10 +10,10 @@ OPT := debug
 # Top-level targets
 
 .PHONY: run
-run : $(BUILD)/bootloader.efi $(BUILD)/kernel
+run : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
 	mkdir -p $(BUILD)/esp/efi/boot
-	cp bootloader/target/x86_64-unknown-uefi/debug/bootloader.efi $(BUILD)/esp/efi/boot/bootx64.efi
-	cp $(BUILD)/kernel $(BUILD)/esp/kernel.bin
+	cp $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/esp/efi/boot/bootx64.efi
+	cp $(BUILD)/kernel.$(OPT) $(BUILD)/esp/kernel.bin
 
 	cp $$OVMF_PATH/OVMF_CODE.fd $(BUILD)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
@@ -30,10 +30,10 @@ run : $(BUILD)/bootloader.efi $(BUILD)/kernel
 		-drive format=raw,file=fat:rw:$(BUILD)/esp
 
 .PHONY: debug
-debug : bootloader/target/x86_64-unknown-uefi/debug/bootloader.efi $(BUILD)/kernel
+debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/kernel.$(OPT)
 	mkdir -p $(BUILD)/esp/efi/boot
-	cp bootloader/target/x86_64-unknown-uefi/debug/bootloader.efi $(BUILD)/esp/efi/boot/bootx64.efi
-	cp $(BUILD)/kernel $(BUILD)/esp/kernel.bin
+	cp bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/esp/efi/boot/bootx64.efi
+	cp $(BUILD)/kernel.$(OPT) $(BUILD)/esp/kernel.bin
 
 	cp $$OVMF_PATH/OVMF_CODE.fd $(BUILD)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
@@ -48,11 +48,11 @@ debug : bootloader/target/x86_64-unknown-uefi/debug/bootloader.efi $(BUILD)/kern
 		-drive if=pflash,format=raw,readonly=off,file=$(BUILD)/OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:$(BUILD)/esp & \
 	lldb \
-		-O "target create --no-dependents --arch x86_64 bootloader/target/x86_64-unknown-uefi/debug/bootloader.efi --symfile bootloader/target/x86_64-unknown-uefi/debug/bootloader.pdb" \
+		-O "target create --no-dependents --arch x86_64 bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi --symfile bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.pdb" \
 		-O "gdb-remote localhost:1234"
 
 .PHONY: build
-build : $(BUILD)/bootloader.efi $(BUILD)/kernel
+build : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
 
 .PHONY: clean
 clean :
@@ -76,7 +76,7 @@ bootloader_debug_deps := $(bootloader_build_deps) bootloader/x86_64-unknown-uefi
 bootloader/target/x86_64-unknown-uefi-debug/debug/bootloader.efi : $(bootloader_debug_deps) 
 	cd bootloader && cargo build -Z build-std --target x86_64-unknown-uefi-debug.json
 
-$(BUILD)/bootloader.efi : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi
+$(BUILD)/bootloader.efi.$(OPT) : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi
 	mkdir -p $(BUILD)
 	cp $< $@
 
@@ -97,6 +97,6 @@ kernel_build_deps += kernel/$(kernel_build_target_file) kernel/kernel.ld
 kernel/target/$(kernel_build_target)/$(OPT)/kernel : $(kernel_build_deps)
 	cd kernel && cargo build $(kernel_build_flags)
 
-$(BUILD)/kernel : kernel/target/$(kernel_build_target)/$(OPT)/kernel
+$(BUILD)/kernel.$(OPT) : kernel/target/$(kernel_build_target)/$(OPT)/kernel
 	mkdir -p $(BUILD)
 	cp $< $@
