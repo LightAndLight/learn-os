@@ -18,7 +18,9 @@
       in {
         devShell =
           pkgs.mkShell {
-            buildInputs = with pkgs; [
+            packages = with pkgs; [
+              binutils
+
               # (rust-bin.stable.${rustVersion}.default.override {
               (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
                 extensions = [
@@ -38,12 +40,17 @@
               # })
               }))
 
+
               qemu
               gdb
               lldb
             ];
 
             OVMF_PATH = "${pkgs.OVMF.fd}/FV";
+
+            shellHook = ''
+              export MANPATH="${pkgs.binutils.man}/share/man:$(manpath)"
+            '';
           };
       }
     );
