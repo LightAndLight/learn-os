@@ -77,6 +77,7 @@ debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/ker
 			-drive if=pflash,format=raw,readonly=off,file=$(BUILD)/OVMF_VARS.fd \
 			-drive format=raw,file=fat:rw:$(BUILD)/esp &
 	lldb \
+		-O "settings set target.x86-disassembly-flavor intel" \
 		-O "target create --no-dependents --arch x86_64 bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi --symfile bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.pdb" \
 		-O "gdb-remote localhost:1234"
 
