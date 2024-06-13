@@ -4,7 +4,7 @@ Finding the right [cross-compilation options](https://doc.rust-lang.org/rustc/ta
 I made it a lot harder for myself by trying to generate a flat binary for my kernel.
 `kernel/src/main.rs`, `kernel/x86_64-unknown-kernel.json`, and `kernel/kernel.ld` are the end results of a lot of fiddling.
 
-## References
+## Notes
 
 * [Redox's `x86_64-unknown-kernel` target](https://gitlab.redox-os.org/redox-os/kernel/-/blob/master/targets/x86_64-unknown-kernel.json?ref_type=heads)
 
@@ -25,3 +25,12 @@ I made it a lot harder for myself by trying to generate a flat binary for my ker
   ([linker script](http://web.archive.org/web/20220510092031/https://github.com/leon-robi/Trout/blob/main/Kernel/Linker.lds),
   [assembler code](http://web.archive.org/web/20220510092017/https://github.com/leon-robi/Trout/blob/main/Kernel/Kernel.asm))
   to get a flat binary that behaves properly regardless of the kernel entrypoint's location.
+
+* For a while I had the linker's initial [location counter](https://sourceware.org/binutils/docs/ld/Location-Counter.html) set
+  to `0x0` even though I was loading the kernel at `0x1000`. This worked until I tried to use
+  [trait objects](https://doc.rust-lang.org/book/ch17-02-trait-objects.html).
+
+  The symptom was that the trait object method call tried to jump a location in my stack. The code it actually needed
+  to jump to was at that location + `0x1000`. At first I thought the problem was with position-independent code generation,
+  but that was a incorrect. With the initial location counter set correctly in the linker script, the position-independent
+  code works.

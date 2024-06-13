@@ -38,7 +38,8 @@ use uefi_pci::{PciConfigurationAddress, PciRootBridgeIo};
 
 /* Note [The kernel's entrypoint]
 
-`KERNEL_ENTRYPOINT` is in virtual address space. It's slightly offset to make room for a stack.
+The kernel runs in its own virtual address space. The kernel code starts at 0x1000, and
+0x0 to 0xfff is used for the stack.
 */
 const KERNEL_ENTRYPOINT: u64 = 0x1000;
 
