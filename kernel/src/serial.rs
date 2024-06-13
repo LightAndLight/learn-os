@@ -69,3 +69,16 @@ impl PC16500D {
         }
     }
 }
+
+impl core::fmt::Write for PC16500D {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let mut buffer = [0_u8, 0, 0, 0];
+        for c in s.chars() {
+            c.encode_utf8(&mut buffer);
+            for i in 0..c.len_utf8() {
+                unsafe { self.write_u8(buffer[i]) }
+            }
+        }
+        Ok(())
+    }
+}

@@ -6,6 +6,7 @@ pub mod serial;
 
 use core::{
     arch::{asm, global_asm},
+    fmt::Write,
     hint::unreachable_unchecked,
 };
 
@@ -41,14 +42,7 @@ pub extern "sysv64" fn kernel(_page_size: usize, serial_device_port: u16) -> ! {
         serial_device.set_loopback(false);
     }
 
-    let message = "hello from kernel!\n";
-    let mut buffer = [0_u8, 0, 0, 0];
-    for c in message.chars() {
-        c.encode_utf8(&mut buffer);
-        for i in 0..c.len_utf8() {
-            unsafe { serial_device.write_u8(buffer[i]) }
-        }
-    }
+    writeln!(serial_device, "hello from kernel!").unwrap();
 
     unsafe {
         asm!("2: mov rax, rax", "jmp 2b");
