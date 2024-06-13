@@ -31,6 +31,7 @@ use uefi::{
 };
 
 use common::{
+    exe::v0,
     paging::{PageMap, PageMapFlags},
     registers::{CR0, CR3, CR4, IA32_EFER},
 };
@@ -66,13 +67,12 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         browse_memory_map(&mut system_table);
     }
 
-    let (kernel_addr, kernel_num_pages) =
-        match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin")) {
-            Err(err) => {
-                return err;
-            }
-            Ok(value) => value,
-        };
+    let kernel_info = match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin")) {
+        Err(err) => {
+            return err;
+        }
+        Ok(value) => value,
+    };
 
     let mut allocate_pages = |n| {
         system_table
@@ -85,12 +85,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
     map_stack(&mut allocate_pages, &mut page_map);
 
-    map_kernel(
-        &mut allocate_pages,
-        &mut page_map,
-        kernel_addr,
-        kernel_num_pages,
-    );
+    map_kernel(&mut allocate_pages, &mut page_map, &kernel_info);
 
     map_switch_to_kernel(&mut allocate_pages, &mut page_map);
 
@@ -154,11 +149,17 @@ unsafe fn switch_to_kernel(page_map: PageMap, serial_controller_port: u16) -> ! 
     unreachable_unchecked()
 }
 
+struct KernelInfo {
+    physical_address: u64,
+    size: usize,
+    allocated_pages: usize,
+}
+
 fn load_kernel(
     image_handle: Handle,
     system_table: &mut SystemTable<Boot>,
     kernel_file_name: &CStr16,
-) -> Result<(u64, usize), uefi::Status> {
+) -> Result<KernelInfo, uefi::Status> {
     let mut kernel_file = {
         let mut fs = system_table
             .boot_services()
@@ -238,9 +239,14 @@ fn load_kernel(
         unsafe { core::slice::from_raw_parts_mut(kernel_addr as *mut u8, kernel_size) };
     kernel_file.read(kernel_buffer).unwrap();
     kernel_file.close();
+
     info!("finished reading kernel into memory");
 
-    Ok((kernel_addr, kernel_pages))
+    Ok(KernelInfo {
+        physical_address: kernel_addr,
+        size: kernel_size,
+        allocated_pages: kernel_pages,
+    })
 }
 
 fn map_stack(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
@@ -262,25 +268,77 @@ fn map_stack(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMa
     }
 }
 
+fn map_kernel_segment(
+    allocate_pages: &mut dyn FnMut(usize) -> u64,
+    page_map: &mut PageMap,
+    segment_info: v0::SegmentInfo,
+    segment_data: &[u8],
+    flags: PageMapFlags,
+) {
+    let segment_pages = ((segment_info.size as usize) + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    let base_virtual_addr: u64 = segment_info.load_address;
+    let base_physical_addr: u64 = allocate_pages(segment_pages);
+
+    let mut offset: u64 = 0;
+    for _page in 0..segment_pages {
+        let page_virtual_addr = base_virtual_addr + offset;
+        let page_physical_addr = base_physical_addr + offset;
+
+        let page_buffer: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(page_physical_addr as *mut u8, PAGE_SIZE) };
+
+        for i in 0..PAGE_SIZE {
+            match segment_data.get(offset as usize + i).copied() {
+                None => {
+                    page_buffer[i] = 0;
+                }
+                Some(value) => {
+                    page_buffer[i] = value;
+                }
+            }
+        }
+
+        page_map.set(allocate_pages, page_virtual_addr, page_physical_addr, flags);
+
+        offset += PAGE_SIZE as u64;
+    }
+}
+
 fn map_kernel(
     allocate_pages: &mut dyn FnMut(usize) -> u64,
     page_map: &mut PageMap,
-    kernel_physical_addr: u64,
-    kernel_num_pages: usize,
+    kernel_info: &KernelInfo,
 ) {
-    let mut next_virtual_page_address = KERNEL_ENTRYPOINT;
-    let mut next_physical_page_address = kernel_physical_addr;
-    for _page in 0..kernel_num_pages {
-        page_map.set(
-            allocate_pages,
-            next_virtual_page_address,
-            next_physical_page_address,
-            PageMapFlags::default(),
-        );
+    let kernel_buffer: &[u8] = unsafe {
+        core::slice::from_raw_parts(kernel_info.physical_address as *const u8, kernel_info.size)
+    };
 
-        next_virtual_page_address += PAGE_SIZE as u64;
-        next_physical_page_address += PAGE_SIZE as u64;
-    }
+    let kernel_exe: v0::Exe =
+        v0::Exe::parse(kernel_buffer).expect("kernel is not a v0 learn-os executable");
+
+    map_kernel_segment(
+        allocate_pages,
+        page_map,
+        kernel_exe.code_info(),
+        kernel_exe.code(),
+        PageMapFlags::X,
+    );
+    map_kernel_segment(
+        allocate_pages,
+        page_map,
+        kernel_exe.rodata_info(),
+        kernel_exe.rodata(),
+        PageMapFlags::default(),
+    );
+    map_kernel_segment(
+        allocate_pages,
+        page_map,
+        kernel_exe.rwdata_info(),
+        kernel_exe.rwdata(),
+        PageMapFlags::W,
+    );
+
     info!("finished setting up page map for kernel");
 }
 

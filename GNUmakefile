@@ -10,10 +10,10 @@ OPT := debug
 # Top-level targets
 
 .PHONY: run
-run : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
+run : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.bin.$(OPT)
 	mkdir -p $(BUILD)/esp/efi/boot
 	cp $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/esp/efi/boot/bootx64.efi
-	cp $(BUILD)/kernel.$(OPT) $(BUILD)/esp/kernel.bin
+	cp $(BUILD)/kernel.bin.$(OPT) $(BUILD)/esp/kernel.bin
 
 	cp $$OVMF_PATH/OVMF_CODE.fd $(BUILD)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
@@ -53,10 +53,10 @@ run : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
 		-drive format=raw,file=fat:rw:$(BUILD)/esp
 
 .PHONY: debug
-debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/kernel.$(OPT)
+debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/kernel.bin.$(OPT)
 	mkdir -p $(BUILD)/esp/efi/boot
 	cp bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/esp/efi/boot/bootx64.efi
-	cp $(BUILD)/kernel.$(OPT) $(BUILD)/esp/kernel.bin
+	cp $(BUILD)/kernel.bin.$(OPT) $(BUILD)/esp/kernel.bin
 
 	cp $$OVMF_PATH/OVMF_CODE.fd $(BUILD)
 	cp $$OVMF_PATH/OVMF_VARS.fd $(BUILD)
@@ -82,7 +82,7 @@ debug : bootloader/target/x86_64-unknown-uefi/$(OPT)/bootloader.efi $(BUILD)/ker
 		-O "gdb-remote localhost:1234"
 
 .PHONY: build
-build : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.$(OPT)
+build : $(BUILD)/bootloader.efi.$(OPT) $(BUILD)/kernel.bin.$(OPT)
 
 .PHONY: clean
 clean :
@@ -128,6 +128,22 @@ kernel_build_deps += kernel/$(kernel_build_target_file) kernel/kernel.ld
 kernel/target/$(kernel_build_target)/$(OPT)/kernel : $(kernel_build_deps)
 	cd kernel && cargo build $(kernel_build_flags)
 
-$(BUILD)/kernel.$(OPT) : kernel/target/$(kernel_build_target)/$(OPT)/kernel
+$(BUILD)/kernel.elf.$(OPT) : kernel/target/$(kernel_build_target)/$(OPT)/kernel
 	mkdir -p $(BUILD)
 	cp $< $@
+
+$(BUILD)/kernel.bin.$(OPT) : $(BUILD)/kernel.elf.$(OPT)
+	objcopy \
+		-O binary \
+		--dump-section .header=$(BUILD)/header.bin.$(OPT) \
+		--dump-section .code=$(BUILD)/code.bin.$(OPT) \
+		--dump-section .rodata=$(BUILD)/rodata.bin.$(OPT) \
+		--dump-section .rwdata=$(BUILD)/rwdata.bin.$(OPT) \
+		$< \
+		/dev/null
+	cat \
+		$(BUILD)/header.bin.$(OPT) \
+		$(BUILD)/code.bin.$(OPT) \
+		$(BUILD)/rodata.bin.$(OPT) \
+		$(BUILD)/rwdata.bin.$(OPT) \
+		> $@
