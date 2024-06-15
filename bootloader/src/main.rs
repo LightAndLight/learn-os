@@ -246,7 +246,7 @@ fn load_kernel(
 fn map_stack(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
     // Assumes that the stack precedes the kernel in virtual address space.
     let stack_physical_address = allocate_pages((KERNEL_ENTRYPOINT / (PAGE_SIZE as u64)) as usize);
-    page_map.set_writable(allocate_pages, 0x0, stack_physical_address);
+    page_map.set_rwx(allocate_pages, 0x0, stack_physical_address);
 }
 
 fn map_kernel(
@@ -258,7 +258,7 @@ fn map_kernel(
     let mut next_virtual_page_address = KERNEL_ENTRYPOINT;
     let mut next_physical_page_address = kernel_physical_addr;
     for _page in 0..kernel_num_pages {
-        page_map.set(
+        page_map.set_rx(
             allocate_pages,
             next_virtual_page_address,
             next_physical_page_address,
@@ -309,7 +309,7 @@ fn map_switch_to_kernel(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: 
     `switch_to_kernel`. When this region of code isn't mapped, the instruction fetches
     will cause page faults.
     */
-    page_map.set(
+    page_map.set_rx(
         allocate_pages,
         switch_to_kernel_page_addr,
         switch_to_kernel_page_addr,

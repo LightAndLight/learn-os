@@ -100,9 +100,9 @@ impl PageMap {
 
     /** Map a virtual page address to a physical page address.
 
-    The mapped page is read-only.
+    The mapped page is readable, executable, and not writable.
     */
-    pub fn set(
+    pub fn set_rx(
         &mut self,
         allocate_pages: &mut dyn FnMut(usize) -> u64,
         virtual_page_address: u64,
@@ -162,9 +162,9 @@ impl PageMap {
 
     /** Map a virtual page address to a physical page address.
 
-    The mapped page is writable.
+    The mapped page is readable, writable, and executable.
     */
-    pub fn set_writable(
+    pub fn set_rwx(
         &mut self,
         allocate_pages: &mut dyn FnMut(usize) -> u64,
         virtual_page_address: u64,
