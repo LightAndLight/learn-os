@@ -1,3 +1,5 @@
+use core::ops::BitOr;
+
 #[derive(Debug)]
 struct PageMapIndices {
     pml4: usize,
@@ -44,6 +46,46 @@ unsafe fn init_memory<T: Copy>(data: *mut T, len: usize, value: T) {
     let entries = core::slice::from_raw_parts_mut(data, len).iter_mut();
     for entry in entries {
         *entry = value;
+    }
+}
+
+/** Memory mapping permissions.
+
+The default (`PageMapFlags::default()`) is read-only. Use the associated constants
+with bitwise OR to add more permissions.
+
+## Example
+
+```rust
+let rwx = PageMapFlags::W | PageMapFlags::X;
+```
+*/
+#[derive(Default, Clone, Copy)]
+pub struct PageMapFlags {
+    writeable: bool,
+    executable: bool,
+}
+
+impl PageMapFlags {
+    pub const W: PageMapFlags = PageMapFlags {
+        writeable: true,
+        executable: false,
+    };
+
+    pub const X: PageMapFlags = PageMapFlags {
+        writeable: false,
+        executable: true,
+    };
+}
+
+impl BitOr for PageMapFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            writeable: self.writeable || rhs.writeable,
+            executable: self.executable || rhs.executable,
+        }
     }
 }
 
@@ -98,15 +140,13 @@ impl PageMap {
         unsafe { core::mem::transmute(self.address) }
     }
 
-    /** Map a virtual page address to a physical page address.
-
-    The mapped page is readable, executable, and not writable.
-    */
-    pub fn set_rx(
+    /// Map a virtual page address to a physical page address.
+    pub fn set(
         &mut self,
         allocate_pages: &mut dyn FnMut(usize) -> u64,
         virtual_page_address: u64,
         physical_page_address: u64,
+        flags: PageMapFlags,
     ) {
         assert_eq!(
             virtual_page_address & !0xfff,
@@ -122,6 +162,14 @@ impl PageMap {
             physical_page_address
         );
 
+        // All levels of the page table are created in read-only mode.
+        let default_execute_disable = true;
+        let default_writeable = false;
+
+        // The requested permissions for this page
+        let writeable = flags.writeable;
+        let executable = flags.executable;
+
         let page_map_indices = address_to_page_map_indices(virtual_page_address);
 
         // This could be better. `present()` followed by `unwrap()` looks like an antipattern.
@@ -132,7 +180,21 @@ impl PageMap {
             unsafe {
                 init_memory(pdpt_address as *mut u64, 512, 0);
             }
-            *pml4e = PML4E::new(false, pdpt_address, false, false, false, false);
+
+            *pml4e = PML4E::new(
+                default_execute_disable,
+                pdpt_address,
+                false,
+                false,
+                false,
+                default_writeable,
+            );
+        }
+        if writeable {
+            pml4e.set_writable(true);
+        }
+        if executable {
+            pml4e.set_execute_disable(false);
         }
 
         let pdpt = pml4e.pdpt_mut().unwrap();
@@ -142,7 +204,20 @@ impl PageMap {
             unsafe {
                 init_memory(pd_address as *mut u64, 512, 0);
             }
-            *pdpte = PDPTE::new(false, pd_address, false, false, false, false);
+            *pdpte = PDPTE::new(
+                default_execute_disable,
+                pd_address,
+                false,
+                false,
+                false,
+                default_writeable,
+            );
+        }
+        if writeable {
+            pdpte.set_writable(true);
+        }
+        if executable {
+            pdpte.set_execute_disable(false);
         }
 
         let pd = pdpte.pd_mut().unwrap();
@@ -152,80 +227,31 @@ impl PageMap {
             unsafe {
                 init_memory(pt_address as *mut u64, 512, 0);
             }
-            *pde = PDE::new(false, pt_address, false, false, false, false);
+            *pde = PDE::new(
+                default_execute_disable,
+                pt_address,
+                false,
+                false,
+                false,
+                default_writeable,
+            );
+        }
+        if writeable {
+            pde.set_writable(true);
+        }
+        if executable {
+            pde.set_execute_disable(false);
         }
 
         let pt = pde.pt_mut().unwrap();
-        pt[page_map_indices.pt] =
-            PTE::new(false, physical_page_address, false, false, false, false);
-    }
-
-    /** Map a virtual page address to a physical page address.
-
-    The mapped page is readable, writable, and executable.
-    */
-    pub fn set_rwx(
-        &mut self,
-        allocate_pages: &mut dyn FnMut(usize) -> u64,
-        virtual_page_address: u64,
-        physical_page_address: u64,
-    ) {
-        assert_eq!(
-            virtual_page_address & !0xfff,
-            virtual_page_address,
-            "virtual address {:#x} isn't 4KiB aligned",
-            virtual_page_address
-        );
-
-        assert_eq!(
-            physical_page_address & !0xfff,
+        pt[page_map_indices.pt] = PTE::new(
+            !executable,
             physical_page_address,
-            "physical address {:#x} isn't 4KiB aligned",
-            physical_page_address
+            false,
+            false,
+            false,
+            writeable,
         );
-
-        /* This is the same code as `PageMap::set`, except the all page table levels have
-        to be marked as writable for the virtual page to be writable.
-        */
-
-        let page_map_indices = address_to_page_map_indices(virtual_page_address);
-
-        // This could be better. `present()` followed by `unwrap()` looks like an antipattern.
-        let pml4 = self.pml4_mut();
-        let pml4e: &mut PML4E = &mut pml4[page_map_indices.pml4];
-        if !pml4e.present() {
-            let pdpt_address = allocate_pages(1);
-            unsafe {
-                init_memory(pdpt_address as *mut u64, 512, 0);
-            }
-            *pml4e = PML4E::new(false, pdpt_address, false, false, false, false);
-        }
-        pml4e.set_writable(true);
-
-        let pdpt = pml4e.pdpt_mut().unwrap();
-        let pdpte = &mut pdpt[page_map_indices.pdpt];
-        if !pdpte.present() {
-            let pd_address = allocate_pages(1);
-            unsafe {
-                init_memory(pd_address as *mut u64, 512, 0);
-            }
-            *pdpte = PDPTE::new(false, pd_address, false, false, false, false);
-        }
-        pdpte.set_writable(true);
-
-        let pd = pdpte.pd_mut().unwrap();
-        let pde = &mut pd[page_map_indices.pd];
-        if !pde.present() {
-            let pt_address = allocate_pages(1);
-            unsafe {
-                init_memory(pt_address as *mut u64, 512, 0);
-            }
-            *pde = PDE::new(false, pt_address, false, false, false, false);
-        }
-        pde.set_writable(true);
-
-        let pt = pde.pt_mut().unwrap();
-        pt[page_map_indices.pt] = PTE::new(false, physical_page_address, false, false, false, true);
     }
 
     pub fn debug(
@@ -331,6 +357,15 @@ impl PML4E {
         self.0
     }
 
+    pub fn set_execute_disable(&mut self, value: bool) {
+        let mask = 1 << 63;
+        if value {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
     pub fn present(&self) -> bool {
         self.0 & 1 == 1
     }
@@ -349,12 +384,17 @@ impl PML4E {
         }
     }
 
+    fn pdpt_address(&self) -> u64 {
+        let mask = (1 << 63) | 0xfff;
+        self.0 & !mask
+    }
+
     /// Get an exclusive reference to the PDPT pointed to by this entry.
     pub fn pdpt_mut(&mut self) -> Option<&mut [PDPTE]> {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts_mut(
-                    (self.0 & !0xfff) as *mut PDPTE,
+                    self.pdpt_address() as *mut PDPTE,
                     512,
                 ))
             }
@@ -368,7 +408,7 @@ impl PML4E {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts(
-                    (self.0 & !0xfff) as *mut PDPTE,
+                    self.pdpt_address() as *const PDPTE,
                     512,
                 ))
             }
@@ -439,6 +479,15 @@ impl PDPTE {
         self.0
     }
 
+    pub fn set_execute_disable(&mut self, value: bool) {
+        let mask = 1 << 63;
+        if value {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
     pub fn present(&self) -> bool {
         self.0 & 1 == 1
     }
@@ -457,12 +506,17 @@ impl PDPTE {
         }
     }
 
+    fn pd_address(&self) -> u64 {
+        let mask = (1 << 63) | 0xfff;
+        self.0 & !mask
+    }
+
     /// Get an exclusive reference to the PD pointed to by this entry.
     pub fn pd_mut(&mut self) -> Option<&mut [PDE]> {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts_mut(
-                    (self.0 & !0xfff) as *mut PDE,
+                    self.pd_address() as *mut PDE,
                     512,
                 ))
             }
@@ -476,7 +530,7 @@ impl PDPTE {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts(
-                    (self.0 & !0xfff) as *const PDE,
+                    self.pd_address() as *const PDE,
                     512,
                 ))
             }
@@ -547,6 +601,15 @@ impl PDE {
         self.0
     }
 
+    pub fn set_execute_disable(&mut self, value: bool) {
+        let mask = 1 << 63;
+        if value {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
     pub fn present(&self) -> bool {
         self.0 & 1 == 1
     }
@@ -565,12 +628,17 @@ impl PDE {
         }
     }
 
+    fn pt_address(&self) -> u64 {
+        let mask = (1 << 63) | 0xfff;
+        self.0 & !mask
+    }
+
     /// Get an exclusive reference to the PT pointed to by this entry.
     pub fn pt_mut(&mut self) -> Option<&mut [PTE]> {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts_mut(
-                    (self.0 & !0xfff) as *mut PTE,
+                    self.pt_address() as *mut PTE,
                     512,
                 ))
             }
@@ -584,7 +652,7 @@ impl PDE {
         if self.present() {
             unsafe {
                 Some(core::slice::from_raw_parts(
-                    (self.0 & !0xfff) as *const PTE,
+                    self.pt_address() as *const PTE,
                     512,
                 ))
             }
