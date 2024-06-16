@@ -38,8 +38,8 @@ use uefi_pci::{PciConfigurationAddress, PciRootBridgeIo};
 
 /* Note [The kernel's entrypoint]
 
-The kernel runs in its own virtual address space. The kernel code starts at 0x1000, and
-0x0 to 0xfff is used for the stack.
+The kernel runs in its own virtual address space. The kernel code starts at `KERNEL_ENTRYPOINT`, and
+everything between 0x0 and `KERNEL_ENTRYPOINT` is the kernel's stack.
 */
 const KERNEL_ENTRYPOINT: u64 = 0x1000;
 
@@ -244,9 +244,22 @@ fn load_kernel(
 }
 
 fn map_stack(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
+    let stack_num_pages = (KERNEL_ENTRYPOINT as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+
     // Assumes that the stack precedes the kernel in virtual address space.
-    let stack_physical_address = allocate_pages((KERNEL_ENTRYPOINT / (PAGE_SIZE as u64)) as usize);
-    page_map.set(allocate_pages, 0x0, stack_physical_address, PageMapFlags::W);
+    let stack_virtual_address = 0x0;
+    let stack_physical_address = allocate_pages(stack_num_pages);
+
+    let mut offset = 0;
+    for _page in 0..stack_num_pages {
+        page_map.set(
+            allocate_pages,
+            stack_virtual_address + offset,
+            stack_physical_address + offset,
+            PageMapFlags::W,
+        );
+        offset += PAGE_SIZE as u64;
+    }
 }
 
 fn map_kernel(
