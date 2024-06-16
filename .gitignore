@@ -1,5 +1,4 @@
 .envrc
 .direnv/
-target/
 .build/
 qemu.log
