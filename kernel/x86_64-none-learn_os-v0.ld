@@ -90,7 +90,13 @@ SECTIONS {
   } : rwdata
 
   /DISCARD/ : {
-	*(.comment*)
+    *(.comment*)
+
+    /*
+    The Rust target has `"panic-strategy": "abort"`, so exception handlers
+    are irrelevant.
+    */
+    *(.eh_frame*)
   }
 }
 
