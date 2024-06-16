@@ -2,3 +2,4 @@
 .direnv/
 target/
 .build/
+qemu.log
