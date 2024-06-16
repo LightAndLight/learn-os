@@ -14,7 +14,7 @@
   "os": "none",
   "panic-strategy": "abort",
   "post-link-args": {
-    "gnu-lld": ["-T", "kernel.ld"]
+    "gnu-lld": ["-T", "x86_64-none-learn_os-v0.ld"]
   },
   "target-c-int-width": "32",
   "target-endian": "little",

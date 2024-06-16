@@ -28,7 +28,13 @@ Since I'm not concerned with compatibility, I've created my own simplified execu
 
 ## The `learn-os` executable format (v0)
 
-A `learn-os` executable consists of a program header followed by three segments: code, rodata, and rwdata.
+| File | Description |
+| --- | --- |
+| <../kernel/x86_64-none-learn_os-v0.json> | Rust cross-compilation target[^1] |
+| <../kernel/x86_64-none-learn_os-v0.ld> | Linker script |
+| <../common/src/exe/v0.rs> | Format spec |
+
+A `learn-os` executable consists of a program header (little-endian) followed by three segments: code, rodata, and rwdata.
 It's intended to be loaded into read-only memory, with the segments then copied into pages that are mapped
 with the correct permissions. An executable that uses all 3 segment types will occupy a minimum of 12MiB of
 RAM at runtime, because memory access permissions can't be set for regions smaller than a single page.
@@ -40,41 +46,3 @@ can be set. For small executables the page alignment means that most of the exec
 As executables grow larger, the space savings from the compact format account for a smaller proportion
 of the total size, and the time spent copying segments grows. Larger executables will benefit from
 a mappable format, which can be specified in a new version.
-
-Note: fields larger than a byte are stored little-endian.
-
-```rust
-struct Header {
-  /// Must be `[0x6c, 0x65, 0x61, 0x72, 0x6e, 0x2d, 0x6f, 0x73]` ("learn-os")
-  magic_bytes: [u8; 8],
-
-  /// Must be `0`
-  version: u16,
-
-  /** Code segment info
-  
-  [`Info::load_address`] must also be the program's entrypoint.
-  */
-  code_info: SegmentInfo,
-
-  /// Read-only data segment info
-  rodata_info: SegmentInfo,
-  
-  /// Read-write data segment info
-  rwdata_info: SegmentInfo
-}
-
-struct SegmentInfo {
-  /// Byte at which the segment begins, relative to the start of the binary.
-  start: u64,
-
-  /// Segment size, in bytes.
-  size: u64,
-
-  /** Virtual address at which the segment should be loaded.
-
-  Must be 4KiB aligned.
-  */
-  load_address: u64
-}
-```

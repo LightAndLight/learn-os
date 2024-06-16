@@ -2,7 +2,7 @@
 
 Finding the right [cross-compilation options](https://doc.rust-lang.org/rustc/targets/custom.html) for the kernel was a pain.
 I made it a lot harder for myself by trying to generate a flat binary for my kernel.
-`kernel/src/main.rs`, `kernel/x86_64-unknown-kernel.json`, and `kernel/kernel.ld` are the end results of a lot of fiddling.
+`kernel/src/main.rs`, `kernel/x86_64-none-learn_os-v0.json`, and `kernel/x86_64-none-learn_os-v0.ld` are the end results of a lot of fiddling.
 
 ## Notes
 

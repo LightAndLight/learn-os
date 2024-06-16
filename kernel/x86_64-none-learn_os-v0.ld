@@ -1,3 +1,28 @@
+/* This linker script is used as part of the `x86_64-none-learn_os-v0.json` Rust target.
+Cargo ends up producing an ELF executable, so there's an extra step required to get a
+binary of the right format:
+
+```
+dir=$(mktemp --tempdir)
+
+objcopy \
+  -O binary \
+  --dump-section .header=$tmpheader.bin \
+  --dump-section .code=$tmp/code.bin \
+  --dump-section .rodata=$tmp/rodata.bin \
+  --dump-section .rwdata=$tmp/rwdata.bin \
+  program.elf \
+  /dev/null
+
+cat \
+  $dir/header.bin \
+  $dir/code.bin \
+  $dir/rodata.bin \
+  $dir/rwdata.bin \
+  > program.bin
+```
+*/
+
 PHDRS {
   header PT_PHDR;
   code PT_LOAD FLAGS(5);   /* 0b101 - read + execute */

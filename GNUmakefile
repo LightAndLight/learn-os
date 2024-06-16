@@ -114,7 +114,7 @@ $(BUILD)/bootloader.efi.$(OPT) : bootloader/target/x86_64-unknown-uefi/$(OPT)/bo
 
 # Kernel
 
-kernel_build_target := x86_64-unknown-kernel
+kernel_build_target := x86_64-none-learn_os-v0
 kernel_build_target_file := $(kernel_build_target).json
 kernel_build_flags := --target $(kernel_build_target_file) -Z build-std=core
 ifeq ($(OPT),release)
@@ -124,7 +124,7 @@ endif
 kernel_build_deps := kernel/Cargo.toml
 kernel_build_deps += $(shell fd -e rs --full-path kernel/src)
 kernel_build_deps += $(shell fd -e rs --full-path common/src)
-kernel_build_deps += kernel/$(kernel_build_target_file) kernel/kernel.ld
+kernel_build_deps += kernel/$(kernel_build_target_file) kernel/x86_64-none-learn_os-v0.ld
 kernel/target/$(kernel_build_target)/$(OPT)/kernel : $(kernel_build_deps)
 	cd kernel && cargo build $(kernel_build_flags)
 
