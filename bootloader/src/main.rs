@@ -67,27 +67,41 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         browse_memory_map(&mut system_table);
     }
 
-    let kernel_info = match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin")) {
-        Err(err) => {
-            return err;
+    let mut page_map: PageMap;
+    {
+        let kernel_info = match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin"))
+        {
+            Err(err) => {
+                return err;
+            }
+            Ok(value) => value,
+        };
+
+        let mut allocate_pages = |n| {
+            system_table
+                .boot_services()
+                .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, n)
+                .unwrap()
+        };
+
+        page_map = PageMap::new(&mut allocate_pages, PAGE_SIZE);
+        info!("initialised page table");
+
+        map_stack(&mut allocate_pages, &mut page_map);
+        info!("set up page table entries for stack");
+
+        map_kernel(&mut allocate_pages, &mut page_map, &kernel_info);
+
+        map_switch_to_kernel(&mut allocate_pages, &mut page_map);
+
+        // Safety: `kernel_info` is not used after this.
+        unsafe {
+            system_table
+                .boot_services()
+                .free_pages(kernel_info.physical_address, kernel_info.allocated_pages)
+                .unwrap();
         }
-        Ok(value) => value,
-    };
-
-    let mut allocate_pages = |n| {
-        system_table
-            .boot_services()
-            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, n)
-            .unwrap()
-    };
-
-    let mut page_map = PageMap::new(&mut allocate_pages, PAGE_SIZE);
-
-    map_stack(&mut allocate_pages, &mut page_map);
-
-    map_kernel(&mut allocate_pages, &mut page_map, &kernel_info);
-
-    map_switch_to_kernel(&mut allocate_pages, &mut page_map);
+    }
 
     // TODO: map the rest of available memory?
     info!("total memory mapped: {}B", page_map.size());
