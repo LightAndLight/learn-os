@@ -148,19 +148,22 @@ unsafe fn switch_to_kernel(page_map: PageMap, serial_controller_port: u16) -> ! 
 
     cr3.write();
 
-    asm!(
-        "mov rbp, {0}",
-        "mov rsp, {0}",
-        "mov rdi, {1}",
-        "mov si, {2:x}",
-        "jmp {0}",
-        // See Note [The kernel's virtual address]
-        in(reg) KERNEL_ENTRYPOINT,
-        in(reg) PAGE_SIZE,
-        in(reg) serial_controller_port
-    );
+    // Set up the kernel's stack.
+    asm!("mov rbp, {0}", "mov rsp, {0}", in(reg) KERNEL_ENTRYPOINT);
 
-    unreachable_unchecked()
+    /* Have the compiler generate the call to the kernel. Previously this was hand-written
+    assembly. I think the current way is less error-prone.
+
+    The `transmute` call has to be inline. If it's `let`-bound then it will live in the
+    function's stack frame in debug mode (the compiler won't automatically inline it).
+    We just changed the stack, so the function call will try to jump to a garbage address
+    that was read from the kernel stack.
+
+    The `KernelFn` type must match the signature of [`kernel::kernel`].
+    */
+    type KernelFn = extern "sysv64" fn(usize, u16) -> !;
+
+    core::mem::transmute::<u64, KernelFn>(KERNEL_ENTRYPOINT)(PAGE_SIZE, serial_controller_port)
 }
 
 struct KernelInfo {
