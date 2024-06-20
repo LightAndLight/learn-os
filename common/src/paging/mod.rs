@@ -309,7 +309,6 @@ impl PageMap {
 
 Reference: Intel® 64 and IA-32 Architectures Software Developer’s Manual, Vol 3A, Table 4-15 and Figure 4-11.
 */
-#[derive(Clone, Copy)]
 pub struct PML4E(u64);
 
 impl PML4E {
@@ -431,7 +430,6 @@ impl PML4E {
 
 Reference: Intel® 64 and IA-32 Architectures Software Developer’s Manual, Vol 3A, Table 4-17 and Figure 4-11.
 */
-#[derive(Clone, Copy)]
 pub struct PDPTE(u64);
 
 impl PDPTE {
@@ -553,7 +551,6 @@ impl PDPTE {
 
 Reference: Intel® 64 and IA-32 Architectures Software Developer’s Manual, Vol 3A, Table 4-19 and Figure 4-11.
 */
-#[derive(Clone, Copy)]
 pub struct PDE(u64);
 
 impl PDE {
@@ -675,7 +672,6 @@ impl PDE {
 
 Reference: Intel® 64 and IA-32 Architectures Software Developer’s Manual, Vol 3A, Table 4-20 and Figure 4-11.
 */
-#[derive(Clone, Copy)]
 pub struct PTE(u64);
 
 impl PTE {
