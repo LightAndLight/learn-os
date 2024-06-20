@@ -8,7 +8,6 @@ extern crate alloc;
 use core::{
     arch::asm,
     borrow::{Borrow, BorrowMut},
-    hint::unreachable_unchecked,
     ptr::NonNull,
 };
 
@@ -68,7 +67,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     }
 
     let mut page_map: PageMap;
-    {
+    let switch_to_kernel_page_addr = {
         let kernel_info = match load_kernel(image_handle, &mut system_table, cstr16!("kernel.bin"))
         {
             Err(err) => {
@@ -92,7 +91,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
         map_kernel(&mut allocate_pages, &mut page_map, &kernel_info);
 
-        map_switch_to_kernel(&mut allocate_pages, &mut page_map);
+        let switch_to_kernel_page_addr = map_switch_to_kernel(&mut allocate_pages, &mut page_map);
 
         // Safety: `kernel_info` is not used after this.
         unsafe {
@@ -101,7 +100,9 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                 .free_pages(kernel_info.physical_address, kernel_info.allocated_pages)
                 .unwrap();
         }
-    }
+
+        switch_to_kernel_page_addr
+    };
 
     // TODO: map the rest of available memory?
     info!("total memory mapped: {}B", page_map.size());
@@ -128,10 +129,14 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let (_system_table, _memory_map) =
         unsafe { system_table.exit_boot_services(MemoryType::LOADER_DATA) };
 
-    unsafe { switch_to_kernel(page_map, serial_controller_port) }
+    unsafe { switch_to_kernel(page_map, switch_to_kernel_page_addr, serial_controller_port) }
 }
 
-unsafe fn switch_to_kernel(page_map: PageMap, serial_controller_port: u16) -> ! {
+unsafe fn switch_to_kernel(
+    page_map: PageMap,
+    switch_to_kernel_page_addr: u64,
+    serial_device_port: u16,
+) -> ! {
     let mut cr3 = CR3::read();
 
     cr3.set_address(page_map.address());
@@ -161,9 +166,14 @@ unsafe fn switch_to_kernel(page_map: PageMap, serial_controller_port: u16) -> ! 
 
     The `KernelFn` type must match the signature of [`kernel::kernel`].
     */
-    type KernelFn = extern "sysv64" fn(usize, u16) -> !;
+    type KernelFn = extern "sysv64" fn(usize, u64, u16) -> !;
 
-    core::mem::transmute::<u64, KernelFn>(KERNEL_ENTRYPOINT)(PAGE_SIZE, serial_controller_port)
+    core::mem::transmute::<u64, KernelFn>(KERNEL_ENTRYPOINT)(
+        // See also: Note [Kernel entrypoint arguments]
+        PAGE_SIZE,
+        switch_to_kernel_page_addr,
+        serial_device_port,
+    )
 }
 
 struct KernelInfo {
@@ -359,7 +369,10 @@ fn map_kernel(
     info!("finished setting up page map for kernel");
 }
 
-fn map_switch_to_kernel(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: &mut PageMap) {
+fn map_switch_to_kernel(
+    allocate_pages: &mut dyn FnMut(usize) -> u64,
+    page_map: &mut PageMap,
+) -> u64 {
     let switch_to_kernel_addr: u64 = unsafe {
         let addr: u64;
         asm!("2: lea {0}, {1}", out(reg) addr, sym switch_to_kernel);
@@ -405,6 +418,8 @@ fn map_switch_to_kernel(allocate_pages: &mut dyn FnMut(usize) -> u64, page_map: 
         PageMapFlags::X,
     );
     info!("finished setting up page map for context switch");
+
+    switch_to_kernel_page_addr
 }
 
 pub struct PciHeader {
