@@ -263,6 +263,46 @@ impl PageMap {
         );
     }
 
+    /// Unmap a virtual page address.
+    pub fn unset(&mut self, virtual_page_address: u64) {
+        assert_eq!(
+            virtual_page_address & !0xfff,
+            virtual_page_address,
+            "virtual address {:#x} isn't 4KiB aligned",
+            virtual_page_address
+        );
+
+        let indices = address_to_page_map_indices(virtual_page_address);
+
+        let pml4 = self.pml4_mut();
+        let pml4e = &mut pml4[indices.pml4];
+
+        let pdpt = match pml4e.pdpt_mut() {
+            None => {
+                return;
+            }
+            Some(pdpt) => pdpt,
+        };
+        let pdpte = &mut pdpt[indices.pdpt];
+
+        let pd = match pdpte.pd_mut() {
+            None => {
+                return;
+            }
+            Some(pd) => pd,
+        };
+        let pde = &mut pd[indices.pd];
+
+        let pt = match pde.pt_mut() {
+            None => {
+                return;
+            }
+            Some(pt) => pt,
+        };
+
+        pt[indices.pt] = PTE::unset();
+    }
+
     pub fn debug(
         &self,
         debug_pml4e: &mut dyn FnMut(usize, &PML4E),
@@ -722,6 +762,10 @@ impl PTE {
         value |= 1;
 
         Self(value)
+    }
+
+    pub fn unset() -> Self {
+        Self(0)
     }
 
     pub fn value(&self) -> u64 {

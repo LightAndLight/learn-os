@@ -52,7 +52,7 @@ global_asm!(
 */
 pub extern "sysv64" fn kernel(
     _page_size: usize,
-    _switch_to_kernel_page_addr: u64,
+    switch_to_kernel_page_addr: u64,
     serial_device_port: u16,
 ) -> ! {
     /* Note [Kernel entrypoint arguments]
@@ -77,7 +77,8 @@ pub extern "sysv64" fn kernel(
 
     let mut serial_device = unsafe { PC16500D::new(IoPort(serial_device_port)) };
 
-    let _page_map = PageMap::from_cr3();
+    let mut page_map = PageMap::from_cr3();
+    page_map.unset(switch_to_kernel_page_addr);
 
     writeln!(serial_device, "hello from kernel!").unwrap();
 
