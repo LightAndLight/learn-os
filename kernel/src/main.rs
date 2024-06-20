@@ -12,7 +12,10 @@ use core::{
     hint::unreachable_unchecked,
 };
 
-use common::registers::CR3;
+use common::{
+    paging::{self, PageMap},
+    registers::CR3,
+};
 use io::IoPort;
 use panic::init_panic_logger;
 use serial::PC16500D;
@@ -74,7 +77,7 @@ pub extern "sysv64" fn kernel(
 
     let mut serial_device = unsafe { PC16500D::new(IoPort(serial_device_port)) };
 
-    let _cr3 = CR3::read();
+    let _page_map = PageMap::from_cr3();
 
     writeln!(serial_device, "hello from kernel!").unwrap();
 

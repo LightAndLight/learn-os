@@ -83,7 +83,13 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                 .unwrap()
         };
 
-        page_map = PageMap::new(&mut allocate_pages, PAGE_SIZE);
+        assert!(
+            PAGE_SIZE == PageMap::PAGE_SIZE,
+            "UEFI page size ({}B) is incompatible with page table's page size ({}B)",
+            PAGE_SIZE,
+            PageMap::PAGE_SIZE
+        );
+        page_map = PageMap::new(&mut allocate_pages);
         info!("initialised page table");
 
         map_stack(&mut allocate_pages, &mut page_map);

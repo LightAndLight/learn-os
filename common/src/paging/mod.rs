@@ -1,5 +1,7 @@
 use core::ops::BitOr;
 
+use crate::registers::CR3;
+
 #[derive(Debug)]
 struct PageMapIndices {
     pml4: usize,
@@ -89,17 +91,17 @@ impl BitOr for PageMapFlags {
     }
 }
 
+/// A 4-level page table structure for x86-64.
 #[repr(C)]
 pub struct PageMap {
     /// The page map's physical address.
     address: u64,
-
-    /// The page size used in the map.
-    page_size: usize,
 }
 
 impl PageMap {
-    pub fn new(allocate_pages: &mut dyn FnMut(usize) -> u64, page_size: usize) -> Self {
+    pub const PAGE_SIZE: usize = 4096;
+
+    pub fn new(allocate_pages: &mut dyn FnMut(usize) -> u64) -> Self {
         let pml4_address: u64 = allocate_pages(1);
         unsafe {
             init_memory(pml4_address as *mut u64, 512, 0);
@@ -107,7 +109,14 @@ impl PageMap {
 
         PageMap {
             address: pml4_address,
-            page_size,
+        }
+    }
+
+    /// Read the page table assigned to the [`CR3`] register.
+    pub fn from_cr3() -> Self {
+        let cr3 = CR3::read();
+        Self {
+            address: cr3.address(),
         }
     }
 
@@ -123,7 +132,7 @@ impl PageMap {
             for pd in pdpt.iter().filter_map(|pdpte| pdpte.pd()) {
                 for pt in pd.iter().filter_map(|pde| pde.pt()) {
                     for _pte in pt.iter().filter(|pte| pte.present()) {
-                        total += self.page_size;
+                        total += Self::PAGE_SIZE;
                     }
                 }
             }
