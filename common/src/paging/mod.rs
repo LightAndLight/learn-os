@@ -91,10 +91,18 @@ impl BitOr for PageMapFlags {
     }
 }
 
-/// A 4-level page table structure for x86-64.
+pub enum PageMapMode {
+    /// The page map is currently being used for address translation.
+    Active,
+
+    /// The page map is not being used for address translation.
+    Inactive,
+}
+
+/// A 4-level, recursively-mapped page table structure for x86-64.
 #[repr(C)]
 pub struct PageMap {
-    /// The page map's physical address.
+    /// The page map's memory address.
     address: u64,
 }
 
@@ -141,12 +149,240 @@ impl PageMap {
         total
     }
 
-    pub fn pml4_mut(&mut self) -> &mut [PML4E; 512] {
-        unsafe { core::mem::transmute(self.address) }
+    /** Get a mutable pointer to the PML4.
+
+    * [`PageMapMode::Active`] - access the PML4 via recursive mapping
+    * [`PageMapMode::Inactive`] - access the PML4 using the page table's underlying address
+
+    # Safety
+
+    * [`PageMapMode::Active`] - the page table must be in use for address translation.
+    * [`PageMapMode::Inactive`] - the page table's underlying address must be mapped.
+
+    When either of these conditions aren't met, the pointer will be invalid and dereferencing
+    it trigger a page fault.
+    */
+    pub fn pml4_mut(&mut self, mode: PageMapMode) -> *mut [PML4E; 512] {
+        match mode {
+            PageMapMode::Active => {
+                /* Note [Recursive mapping]
+
+                Index 511 (the 512th element) of the PML4 is mapped to itself instead of
+                a PML4 entry.
+
+                During address translation, the 9 most significant bits are used as the index
+                into the PML4, and the 9 bits after that are normally an index into the PDPT.
+                The recursive mapping means that starting an address with `0b111_111_111`
+                causes the next 9 bits to index into the PML4 instead of a PDPT. Another
+                `0b111_111_111` brings us back to the PML4 again, when we'd normally have a
+                PD. And one more `0b111_111_111` to get back to the PML4 when we'd normally
+                have a PT.
+
+                At this point there are 12 bits of the address remaining, which are normally
+                used as the offset into the 4KiB page that has been retrieved by delving into
+                the page map. The recursive mapping process has turned up the address of the
+                PML4 instead. It is still a 4KiB page, so the remaining 12 bits are used
+                to index into the PML4, retrieving a PML4 entry.
+
+                Putting this all together, when a PML4 is recursively mapped at index 511
+                and is being used for address translation, its virtual memory address is
+                9 ones, then 9 ones, then 9 ones, then 12 zeroes:
+
+                ```
+                0b111_111_111___111_111_111___111_111_111___000_000_000_000
+
+                = 0b0111_1111_1111_1111_1111_1111_1111_0000_0000_0000
+
+                = 0x7_f_f_f_f_f_f_0_0_0
+
+                = 0x007f_ffff_f000
+                ```
+                */
+
+                0x0007_ffff_f000 as *mut [PML4E; 512]
+            }
+            PageMapMode::Inactive => self.address as *mut [PML4E; 512],
+        }
     }
 
-    pub fn pml4(&self) -> &[PML4E; 512] {
-        unsafe { core::mem::transmute(self.address) }
+    /** Get an immutable pointer to the PML4.
+
+    * [`PageMapMode::Active`] - access the PML4 via recursive mapping
+    * [`PageMapMode::Inactive`] - access the PML4 using the page table's underlying address
+
+    # Safety
+
+    * [`PageMapMode::Active`] - the page table must be in use for address translation.
+    * [`PageMapMode::Inactive`] - the page table's underlying address must be mapped.
+
+    When either of these conditions aren't met, the pointer will be invalid and dereferencing
+    it trigger a page fault.
+    */
+    pub fn pml4(&self, mode: PageMapMode) -> *const [PML4E; 512] {
+        match mode {
+            PageMapMode::Active => {
+                // See Note [Recursive mapping]
+                0x0007_ffff_f000 as *const [PML4E; 512]
+            }
+            PageMapMode::Inactive => self.address as *mut [PML4E; 512],
+        }
+    }
+
+    /** Get a mutable pointer to a PDP table.
+
+    * [`PageMapMode::Active`] - access the PDP via recursive mapping
+    * [`PageMapMode::Inactive`] - access the PDP using the page table's underlying address
+
+    [`PageMap::pml4_mut`] returns PML4 entries, which contain physical addresses of PDP tables.
+    Those physical addresses are not likely to be mapped in an arbitrary page table configuration.
+    When that's the case, PDP tables can still be accessed via recursive mapping.
+
+    # Safety
+
+    * [`PageMapMode::Active`] - the page table must be in use for address translation.
+    * [`PageMapMode::Inactive`] - the physical addresses in the page table must be mapped.
+
+    When either of these conditions aren't met, the pointer will be invalid and dereferencing
+    it trigger a page fault, or the function itself will cause a page fault.
+    */
+    pub unsafe fn pdpt_mut(&mut self, mode: PageMapMode, pml4_index: u16) -> *mut [PDPTE; 512] {
+        // TODO: does this fail on `no_std` (formatting the number)?
+        assert!(pml4_index < (1 << 9), "PML4 index {} > 511", pml4_index);
+
+        match mode {
+            PageMapMode::Active => {
+                /* Note [PDP tables via recursive mapping]
+
+                ```
+                  Get the PML4
+                  |             Get the PML4
+                  |             |             Index into PML4
+                  |             |             |             Offset into PDPT
+                  |             |             |             |
+                  v~~~~~~~~~~   v~~~~~~~~~~   v~~~~~~~~~~   v~~~~~~~~~~~~~~
+                0b111_111_111___111_111_111___xxx_xxx_xxx___000_000_000_000
+                ```
+
+                ```
+                0b111_111_111___111_111_111___xxx_xxx_xxx___000_000_000_000
+
+                = 0b0111_1111_1111_1111_111x_xxxx_xxxx_0000_0000_0000
+
+                = 0x0111_1111_1111_1111_1110_0000_0000_0000_0000_0000 | (0b000x_xxxx_xxxx << 12)
+
+                = 0x007f_ffe0_0000 | (0b000x_xxxx_xxxx << 12)
+                ```
+
+                See also: Note [Recursive mapping]
+                */
+                (0x007f_ffe0_0000_u64 | (pml4_index as u64)) as *mut [PDPTE; 512]
+            }
+            PageMapMode::Inactive => {
+                let pml4e = &mut (*self.pml4_mut(PageMapMode::Inactive))[pml4_index as usize];
+                pml4e.pdpt_address() as *mut [PDPTE; 512]
+            }
+        }
+    }
+
+    /** Get an immutable mutable pointer to a PDP table.
+
+    * [`PageMapMode::Active`] - access the PDP via recursive mapping
+    * [`PageMapMode::Inactive`] - access the PDP using the page table's underlying address
+
+    [`PageMap::pml4_mut`] returns PML4 entries, which contain physical addresses of PDP tables.
+    Those physical addresses are not likely to be mapped in an arbitrary page table configuration.
+    When that's the case, PDP tables can still be accessed via recursive mapping.
+
+    # Safety
+
+    * [`PageMapMode::Active`] - the page table must be in use for address translation.
+    * [`PageMapMode::Inactive`] - the physical addresses in the page table must be mapped.
+
+    When either of these conditions aren't met, the pointer will be invalid and dereferencing
+    it trigger a page fault, or the function itself will cause a page fault.
+    */
+    pub unsafe fn pdpt(&self, mode: PageMapMode, pml4_index: u16) -> *const [PDPTE; 512] {
+        assert!(pml4_index < (1 << 9), "PML4 index {} > 511", pml4_index);
+
+        match mode {
+            PageMapMode::Active => {
+                // See Note [PDP tables via recursive mapping]
+                (0x0007_ffe0_0000_u64 | (pml4_index as u64)) as *mut [PDPTE; 512]
+            }
+            PageMapMode::Inactive => {
+                let pml4e = &(*self.pml4(PageMapMode::Inactive))[pml4_index as usize];
+                pml4e.pdpt_address() as *mut [PDPTE; 512]
+            }
+        }
+    }
+
+    /** Get a mutable pointer to a PD table.
+
+    * [`PageMapMode::Active`] - access the PD via recursive mapping
+    * [`PageMapMode::Inactive`] - access the PD using the page table's underlying address
+
+    [`PageMap::pdp_mut`] returns PDP entries, which contain physical addresses of PD tables.
+    Those physical addresses are not likely to be mapped in an arbitrary page table configuration.
+    When that's the case, PD tables can still be accessed via recursive mapping.
+
+    # Safety
+
+    * [`PageMapMode::Active`] - the page table must be in use for address translation.
+    * [`PageMapMode::Inactive`] - the physical addresses in the page table must be mapped.
+
+    When either of these conditions aren't met, the pointer will be invalid and dereferencing
+    it trigger a page fault, or the function itself will cause a page fault.
+    */
+    pub unsafe fn pd_mut(
+        &mut self,
+        mode: PageMapMode,
+        pml4_index: u16,
+        pdpt_index: u16,
+    ) -> *mut [PDE; 512] {
+        // TODO: does this fail on `no_std` (formatting the number)?
+        assert!(pml4_index < (1 << 9), "PML4 index {} > 511", pml4_index);
+        assert!(pdpt_index < (1 << 9), "PDPT index {} > 511", pdpt_index);
+
+        match mode {
+            PageMapMode::Active => {
+                /* See Note [Recursive mapping] and Note [PDP tables via recursive mapping] for an
+                explanation of how this works.
+
+                ```
+                  Get the PML4
+                  |             Index into PML4
+                  |             |             Index into PDPT
+                  |             |             |             Offset into PD
+                  |             |             |             |
+                  v~~~~~~~~~~   v~~~~~~~~~~   v~~~~~~~~~~   v~~~~~~~~~~~~~~
+                0b111_111_111___xxx_xxx_xxx___yyy_yyy_yyy___000_000_000_000
+                ```
+
+                ```
+                0b111_111_111___xxx_xxx_xxx___yyy_yyy_yyy___000_000_000_000
+
+                = 0b0111_1111_11xx_xxxx_xxxy_yyyy_yyyy_0000_0000_0000
+
+                = 0b0111_1111_1100_0000_0000_0000_0000_0000_0000_0000 | (0b00xx_xxxx_xxx0 << 12 + 9) | (0b000y_yyyy_yyyy << 12)
+
+                = 0x007f_c000_0000 | (0b00xx_xxxx_xxx0 << 12 + 9) | (0b000y_yyyy_yyyy << 12)
+                ```
+
+                See also: Note [Recursive mapping]
+                */
+                let mut mask = pml4_index as u64;
+                mask << 9;
+                mask |= pdpt_index as u64;
+                mask << 12;
+
+                (0x007f_c000_0000_u64 | mask) as *mut [PDE; 512]
+            }
+            PageMapMode::Inactive => {
+                let pdpte =
+                    &mut (*self.pdpt_mut(PageMapMode::Inactive, pml4_index))[pdpt_index as usize];
+                pdpte.pd_address() as *mut [PDE; 512]
+            }
+        }
     }
 
     /// Map a virtual page address to a physical page address.
